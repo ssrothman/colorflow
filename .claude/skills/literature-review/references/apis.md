@@ -15,7 +15,8 @@ GET /api/literature?q=<query>&sort=<mostrecent|mostcited>&size=<n≤1000>&page=<
 - **Always pass `fields=`** — full records are huge (thousand-author lists). Sub-fields allowed: `titles.title,arxiv_eprints.value`. [v]
 - The single-record endpoint `/api/literature/<recid>` returned the *full* record despite `fields=`; use `q=recid:<n>&fields=...` instead. [v]
 - Batch lookup: `q=recid:1 or recid:2 or ...` — 50 OR'ed recids worked, ~100 gave **HTTP 502**. `lr.py` uses batches of 40. [v]
-- **Gotcha: malformed queries silently match the whole database** (~1.6M hits) instead of erroring. Observed with parentheses combined with `refersto:` (`refersto:recid:374155 and (t coherence)` → everything; without parens → 17). An empty `q` also matches everything. Avoid parentheses; treat any total > 500k as a malformed query (`lr.py` aborts). [v]
+- **Gotcha: malformed queries silently match the whole database** (~1.6M hits) instead of erroring. Observed with parentheses combined with `refersto:` (`refersto:recid:374155 and (t coherence)` → everything; without parens → 17). An empty `q` also matches everything. Avoid parentheses; treat any total > 500k as a malformed query (`lr.py` raises an error). [v] A bare `or` after `refersto:` behaves sensibly (`refersto:recid:374155 and t coherence or t jets` → 28, versus 17 for `t coherence` alone), but prefer one filter term per query. [v]
+- DOIs containing parentheses (`doi 10.1016/0370-2693(81)90505-0`) resolve correctly. [v]
 - Append `format=bibtex` to any search URL for BibTeX instead of JSON. [v]
 
 Query syntax (SPIRES-style):

@@ -54,7 +54,7 @@ Start with the human_start.bib bibliography, and loop over the following steps:
 
 You must use the `literature-review` skill. Reading and analysis of many papers and topics should be fanned out to several subagents. 
 
-If you can't find the full text of a paper, mark it as blocked and continue with the rest of the batch. At the end of each iteration, STOP and ask for human assistance with all blocked papers at once (title, DOI, why it is needed, plus a BibTeX file for Zotero import). Do not summarize a paper from its abstract alone.
+If you can't find the full text of a paper, mark it as blocked and continue with the rest of the batch. STOP and ask for human assistance with all blocked papers at once (title, DOI, why it is needed) when any of these holds at the end of an iteration: about 10 or more papers are blocked; a blocked paper was judged essential at triage (expected relevance 3); or a ~150-paper check-in is due. Otherwise keep going. Do not summarize a paper from its abstract alone.
 
 ### Results, logs, and documentation
 

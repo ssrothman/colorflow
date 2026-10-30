@@ -4,3 +4,4 @@ litreview/papers/
 litreview/.ratelimit/
 *.tmp
 __pycache__/
+.lrtest-*/

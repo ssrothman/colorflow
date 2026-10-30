@@ -19,12 +19,14 @@ Commands (see `lr.py <cmd> -h`):
   list [--status S]   compact paginated listing (--limit/--offset; --abstract for triage)
   fetch ID            obtain full text into litreview/papers/ (Zotero -> arXiv -> INSPIRE docs)
   seed [--bib F]      import a Zotero bib export (default litreview/human_start.bib)
-
-Output volume: keep it small (harness persists large outputs outside the project).
-`refs`/`citing` on big papers emit hundreds of lines: pipe into `new | add` rather than printing.
-Keyword searches (`search`, `arxiv`, filtered `citing`) are appended to litreview/searches.tsv.
   render              regenerate papers.md and queue.md from papers.jsonl
   bibtex              regenerate review.bib for relevance >= 2
+
+Output volume: keep it small (harness persists large outputs outside the project).
+`refs`/`citing` on big papers emit hundreds of lines: pipe straight into `add --via ...`
+(not through `new`: `add` deduplicates itself and records the extra `via` link on known papers,
+which is the nvia ranking signal used in triage). Use `set -o pipefail` so upstream failures surface.
+Keyword searches (`search`, `arxiv`, filtered `citing`) are appended to litreview/searches.tsv.
 """
 import argparse, fcntl, gzip, io, json, os, re, subprocess, sys, tarfile, time
 import urllib.error, urllib.parse, urllib.request
@@ -81,16 +83,20 @@ def http_get(url, service, raw=False, tries=5):
             raise
 
 
+class QueryError(Exception):
+    pass
+
+
 def inspire(q, fields=TRIAGE_FIELDS, sort=None, size=25, page=1):
     if not q.strip():
-        sys.exit("refusing empty INSPIRE query (it matches the whole database)")
+        raise QueryError("refusing empty INSPIRE query (it matches the whole database)")
     p = {"q": q, "size": size, "page": page, "fields": fields}
     if sort:
         p["sort"] = sort
     d = json.loads(http_get(INSPIRE + "?" + urllib.parse.urlencode(p), "inspire"))
     if d["hits"]["total"] > 500_000:
         # INSPIRE silently ignores unparseable queries (e.g. parentheses) and matches everything
-        sys.exit(f"query {q!r} matched {d['hits']['total']} records: almost certainly malformed (avoid parentheses)")
+        raise QueryError(f"query {q!r} matched {d['hits']['total']} records: almost certainly malformed (avoid parentheses)")
     return d
 
 
@@ -118,7 +124,7 @@ def norm(meta, abstract=False):
         "texkey": (meta.get("texkeys") or [None])[0],
         "arxiv": first("arxiv_eprints", "value"),
         "doi": first("dois", "value"),
-        "year": first("publication_info", "year"),
+        "year": next((p["year"] for p in meta.get("publication_info") or [] if p.get("year")), None),
         "collab": first("collaborations", "value"),
         "doctype": ",".join(meta.get("document_type") or []),
         "citations": meta.get("citation_count"),
@@ -135,7 +141,12 @@ def emit(recs):
 
 
 def read_stdin_recs():
-    return [json.loads(l) for l in sys.stdin if l.strip().startswith("{")]
+    recs = [json.loads(l) for l in sys.stdin if l.strip().startswith("{")]
+    good = [r for r in recs if keys(r)]
+    if len(good) < len(recs):
+        print(f"# ignored {len(recs) - len(good)} input lines without recid/arxiv/doi/texkey "
+              "(e.g. 'unresolved' lookups)", file=sys.stderr)
+    return good
 
 
 def fields_for(a):
@@ -181,6 +192,7 @@ def keys(r):
     if r.get("arxiv"): ks.add(("arxiv", r["arxiv"].lower()))
     if r.get("doi"): ks.add(("doi", r["doi"].lower()))
     if r.get("texkey"): ks.add(("texkey", r["texkey"]))
+    if r.get("bibkey"): ks.add(("bibkey", r["bibkey"]))  # lets unresolved bib entries dedup on re-seed
     return ks
 
 
@@ -265,8 +277,10 @@ def cmd_refs(a):
             unresolved.append({k: ref[k] for k in ("title", "arxiv_eprint", "dois", "publication_info", "misc") if k in ref})
     print(f"# {len(refs)} references: {len(recids)} resolved, {len(unresolved)} unresolved", file=sys.stderr)
     emit(norm(m, a.abstract) for m in resolve_recids(recids, fields_for(a)))
-    for u in unresolved:
+    for u in unresolved[:a.show_unresolved]:
         print("# unresolved: " + json.dumps(u, ensure_ascii=False)[:300], file=sys.stderr)
+    if len(unresolved) > a.show_unresolved:
+        print(f"# ... {len(unresolved) - a.show_unresolved} more unresolved (raise --show-unresolved)", file=sys.stderr)
 
 
 def cmd_arxiv(a):
@@ -316,7 +330,10 @@ def cmd_add(a):
 
 
 LIST_KEYS = {"rqs", "via", "zotero"}
-INT_KEYS = {"relevance", "year", "recid", "citations"}
+INT_KEYS = {"relevance", "expect", "year", "recid", "citations"}
+SETTABLE = LIST_KEYS | INT_KEYS | {"status", "priority", "type", "reason", "summary", "fulltext", "notes",
+                                   "title", "doi", "arxiv", "texkey", "collab"}
+TYPES = {"exp", "th", "pheno", "review", "MC"}
 
 
 def parse_val(k, v):
@@ -335,6 +352,8 @@ def apply_set(db, ident, kvs):
         if "=" not in kv:
             return f"bad assignment {kv!r} (want key=value)"
         k, v = kv.split("=", 1)
+        if k not in SETTABLE:
+            return f"unknown field {k!r} (typo?); settable: {sorted(SETTABLE)}"
         try:
             new[k] = parse_val(k, v)
         except ValueError:
@@ -343,8 +362,11 @@ def apply_set(db, ident, kvs):
         return f"bad status {new['status']}; one of {STATUSES}"
     if "priority" in new and new["priority"] not in ("next", "later"):
         return "priority must be next or later"
-    if new.get("relevance") is not None and not 0 <= new["relevance"] <= 3:
-        return "relevance must be 0-3"
+    for k in ("relevance", "expect"):
+        if new.get(k) is not None and not 0 <= new[k] <= 3:
+            return f"{k} must be 0-3"
+    if new.get("type") is not None and new["type"] not in TYPES:
+        return f"type must be one of {sorted(TYPES)}"
     r.update(new)
     return r
 
@@ -356,7 +378,7 @@ def cmd_set(a):
         if isinstance(r, str):
             sys.exit(r)
         save_db(db)
-    print(json.dumps({k: r.get(k) for k in ("texkey", "status", "priority", "relevance", "rqs", "type", "summary")}, ensure_ascii=False))
+    print(json.dumps({k: r.get(k) for k in ("texkey", "status", "priority", "expect", "relevance", "rqs", "type", "summary")}, ensure_ascii=False))
 
 
 def cmd_setmany(a):
@@ -401,7 +423,7 @@ def cmd_list(a):
     for r in page:
         out = {"id": r.get("texkey") or r.get("arxiv") or r.get("doi"), "recid": r.get("recid"), "year": r.get("year"),
                "cites": r.get("citations"), "nvia": len(r.get("via") or []), "status": r.get("status"),
-               "rel": r.get("relevance"), "title": (r.get("title") or "")[:150]}
+               "expect": r.get("expect"), "rel": r.get("relevance"), "title": (r.get("title") or "")[:150]}
         if a.abstract:
             out["abstract"] = abstracts.get(r.get("recid"), "")[:a.abstract_chars]
         print(json.dumps(out, ensure_ascii=False))
@@ -426,7 +448,7 @@ def zotero_pdfs(file_field):
 
 
 def pdftotext(pdf, txt):
-    subprocess.run(["pdftotext", "-layout", pdf, txt], check=False)
+    subprocess.run(["pdftotext", "-layout", pdf, txt], check=False, capture_output=True)
     return os.path.exists(txt) and os.path.getsize(txt) > 2000  # tiny => probably a scan without text layer
 
 
@@ -456,9 +478,11 @@ def cmd_fetch(a):
     os.makedirs(PAPERS, exist_ok=True)
     base = os.path.join(PAPERS, pid(r))
     res = {"id": pid(r)}
-    if r.get("zotero"):
-        pdf = r["zotero"][0]
-        res.update(source="zotero", pdf=pdf, text_layer=pdftotext(pdf, base + ".txt"))
+    zot = [p for p in r.get("zotero") or [] if os.path.exists(p)]
+    if r.get("zotero") and not zot:
+        print(f"# Zotero PDF(s) no longer exist: {r['zotero']}", file=sys.stderr)
+    if zot:
+        res.update(source="zotero", pdf=zot[0], text_layer=pdftotext(zot[0], base + ".txt"))
     if not res.get("source") and r.get("arxiv") and download_pdf(f"https://arxiv.org/pdf/{r['arxiv']}", "arxiv", base + ".pdf"):
         res.update(source="arxiv", pdf=base + ".pdf", text_layer=pdftotext(base + ".pdf", base + ".txt"))
     if a.source:
@@ -491,9 +515,11 @@ def cmd_fetch(a):
             rr["fulltext"] = res["source"]
             if rr.get("status") == "blocked":
                 rr["status"] = "queued"
-        else:
+        elif rr.get("status") in ("candidate", "queued", "blocked"):
             rr["status"] = "blocked"
             res["blocked"] = True
+        else:
+            res["note"] = f"no full text found; status {rr.get('status')!r} left unchanged"
         save_db(db)
     print(json.dumps(res, ensure_ascii=False))
 
@@ -520,6 +546,19 @@ def clean_title(t):
     return " ".join(t.split())
 
 
+def seed_resolve(e):
+    hits, match = [], None
+    if e.get("doi"):
+        hits, _ = inspire_all("doi " + e["doi"], limit=1); match = "doi"
+    if not hits and e.get("eprint"):
+        hits, _ = inspire_all("arxiv " + e["eprint"], limit=1); match = "arxiv"
+    if not hits and e.get("title"):
+        words = [w for w in clean_title(e["title"]).split() if len(w) > 3][:8]
+        if words:
+            hits, _ = inspire_all(" and ".join(f"t {w}" for w in words), limit=2); match = "title"
+    return hits, match
+
+
 def cmd_seed(a):
     """Import a Zotero biblatex export. New entries -> queued/next; existing ones gain Zotero paths
     (and blocked -> queued). Use with --bib for Zotero exports of papers the user downloaded on request."""
@@ -528,14 +567,10 @@ def cmd_seed(a):
     resolved = []
     for e in parse_bib(open(bib, encoding="utf-8").read()):  # network part outside the DB lock
         hits, match = [], None
-        if e.get("doi"):
-            hits, _ = inspire_all("doi " + e["doi"], limit=1); match = "doi"
-        if not hits and e.get("eprint"):
-            hits, _ = inspire_all("arxiv " + e["eprint"], limit=1); match = "arxiv"
-        if not hits and e.get("title"):
-            words = [w for w in clean_title(e["title"]).split() if len(w) > 3][:8]
-            if words:
-                hits, _ = inspire_all(" and ".join(f"t {w}" for w in words), limit=2); match = "title"
+        try:
+            hits, match = seed_resolve(e)
+        except QueryError as err:
+            print(f"# {e['bibkey']}: {err}", file=sys.stderr)
         if hits:
             r = norm(hits[0]["metadata"])
             if match == "title":
@@ -637,6 +672,7 @@ def main():
     p = sp("lookup", cmd_lookup); p.add_argument("ids", nargs="+"); p.add_argument("--abstract", action="store_true")
     p = sp("search", cmd_search); p.add_argument("query"); common(p)
     p = sp("refs", cmd_refs); p.add_argument("recid", type=int); p.add_argument("--abstract", action="store_true")
+    p.add_argument("--show-unresolved", type=int, default=15)
     p = sp("citing", cmd_citing); p.add_argument("recid", type=int); p.add_argument("--filter"); common(p)
     p = sp("arxiv", cmd_arxiv); p.add_argument("query"); common(p, sort="submittedDate")
     sp("new", cmd_new)
@@ -654,7 +690,10 @@ def main():
     sp("render", cmd_render)
     p = sp("bibtex", cmd_bibtex); p.add_argument("--min-rel", type=int, default=2); p.add_argument("--out", default="review.bib")
     a = P.parse_args()
-    a.fn(a)
+    try:
+        a.fn(a)
+    except QueryError as e:
+        sys.exit(f"error: {e}")
 
 
 if __name__ == "__main__":
