@@ -3,7 +3,7 @@
 
 Stdlib only. Run from anywhere:  python3 .claude/skills/literature-review/scripts/lr.py <cmd> ...
 All state lives in ~/colorflow/litreview/. Output is compact JSON lines (one paper per line)
-so it can be piped:  lr.py citing 374155 | lr.py new | lr.py add --via "cites Abe:1994nj"
+so it can be piped:  lr.py citing 374155 | lr.py add
 
 Commands (see `lr.py <cmd> -h`):
   lookup ID...        resolve doi:/arxiv:/recid:/texkey: (or bare DOI / arXiv id / recid) to records
@@ -23,9 +23,11 @@ Commands (see `lr.py <cmd> -h`):
   bibtex              regenerate review.bib for relevance >= 2
 
 Output volume: keep it small (harness persists large outputs outside the project).
-`refs`/`citing` on big papers emit hundreds of lines: pipe straight into `add --via ...`
-(not through `new`: `add` deduplicates itself and records the extra `via` link on known papers,
-which is the nvia ranking signal used in triage). Use `set -o pipefail` so upstream failures surface.
+`refs`/`citing` on big papers emit hundreds of lines: pipe straight into `add` (not through `new`:
+`add` deduplicates itself and records the extra `via` link on known papers). Producers tag each line
+with a standard `_via` label ("ref of recid:N", "cites recid:N", "search: Q", "arxiv: Q"), so `--via`
+is only needed for hand-made input. nvia = number of distinct "ref of"/"cites" links (triage signal).
+Use `set -o pipefail` so upstream failures surface.
 Keyword searches (`search`, `arxiv`, filtered `citing`) are appended to litreview/searches.tsv.
 """
 import argparse, fcntl, gzip, io, json, os, re, subprocess, sys, tarfile, time
@@ -43,7 +45,7 @@ UA = "colorflow-litreview/1.0"
 BATCH = 40  # INSPIRE 502s on ~100 OR'ed recids; 50 tested OK
 
 TRIAGE_FIELDS = ("control_number,texkeys,titles.title,arxiv_eprints.value,dois.value,citation_count,"
-                 "publication_info.year,collaborations.value,document_type")
+                 "publication_info.year,earliest_date,collaborations.value,document_type")
 STATUSES = ["candidate", "queued", "blocked", "read", "skimmed", "rejected"]
 
 
@@ -65,7 +67,7 @@ def _throttle(name, min_interval):
 
 
 def http_get(url, service, raw=False, tries=5):
-    interval = {"inspire": 0.4, "arxiv": 3.1}.get(service, 1.0)
+    interval = {"inspire": 0.4, "arxiv": 3.1, "openalex": 0.2}.get(service, 1.0)
     for i in range(tries):
         _throttle(service, interval)
         try:
@@ -77,7 +79,7 @@ def http_get(url, service, raw=False, tries=5):
             if e.code in (429, 500, 502, 503, 504) and i < tries - 1:
                 time.sleep(5 * (i + 1)); continue
             raise
-        except urllib.error.URLError:
+        except (urllib.error.URLError, OSError):  # incl. timeouts and connection resets
             if i < tries - 1:
                 time.sleep(5 * (i + 1)); continue
             raise
@@ -124,7 +126,8 @@ def norm(meta, abstract=False):
         "texkey": (meta.get("texkeys") or [None])[0],
         "arxiv": first("arxiv_eprints", "value"),
         "doi": first("dois", "value"),
-        "year": next((p["year"] for p in meta.get("publication_info") or [] if p.get("year")), None),
+        "year": next((p["year"] for p in meta.get("publication_info") or [] if p.get("year")),
+                     int(meta["earliest_date"][:4]) if str(meta.get("earliest_date", ""))[:4].isdigit() else None),
         "collab": first("collaborations", "value"),
         "doctype": ",".join(meta.get("document_type") or []),
         "citations": meta.get("citation_count"),
@@ -176,6 +179,19 @@ def merge_missing(old, new):
     for k in ("recid", "texkey", "arxiv", "doi", "year", "collab", "doctype", "citations", "title"):
         if not old.get(k) and new.get(k):
             old[k] = new[k]
+
+
+class Index:
+    """key -> record map for O(1) dedup (keys(): recid/arxiv/doi/texkey/bibkey)."""
+    def __init__(self, db):
+        self.m = {}
+        for r in db:
+            self.put(r)
+    def put(self, r):
+        for k in keys(r):
+            self.m.setdefault(k, r)
+    def get(self, r):
+        return next((self.m[k] for k in keys(r) if k in self.m), None)
 
 
 def save_db(recs):
@@ -238,17 +254,32 @@ def log_search(service, query, total):
         f.write(f"{time.strftime('%Y-%m-%d')}\t{service}\t{query}\t{total}\n")
 
 
+LINK_VIA = ("ref of ", "cites ")  # via labels that count toward nvia (one per source paper)
+
+
+def nvia(r):
+    """Number of distinct reviewed papers linking to r (references or citations), ignoring searches/seeds."""
+    return len({v for v in r.get("via") or [] if v.startswith(LINK_VIA)})
+
+
+def with_via(recs, via):
+    for r in recs:
+        r["_via"] = via
+        yield r
+
+
 def cmd_search(a):
     hits, tot = inspire_all(a.query, fields_for(a), a.sort, a.limit)
     print(f"# {tot} total, showing {len(hits)}", file=sys.stderr)
     if not getattr(a, "nolog", False):
         log_search("inspire", a.query, tot)
-    emit(norm(h["metadata"], a.abstract) for h in hits)
+    emit(with_via((norm(h["metadata"], a.abstract) for h in hits), getattr(a, "via_label", None) or f"search: {a.query}"))
 
 
 def cmd_citing(a):
     q = f"refersto:recid:{a.recid}" + (f" and {a.filter}" if a.filter else "")  # no parens: INSPIRE ignores them
     a.query, a.nolog = q, not a.filter  # unfiltered citation pulls are recorded via `via`, not searches.tsv
+    a.via_label = f"cites recid:{a.recid}"  # same label for mostcited and mostrecent pulls -> counted once
     cmd_search(a)
 
 
@@ -264,6 +295,12 @@ def resolve_recids(recids, fields):
 
 
 def cmd_refs(a):
+    if getattr(a, "filter", None):  # topical subset of a long reference list (resolved references only)
+        hits, tot = inspire_all(f"citedby:recid:{a.recid} and {a.filter}", fields_for(a), "mostcited", 1000)
+        print(f"# {tot} references match filter {a.filter!r}", file=sys.stderr)
+        log_search("inspire", f"citedby:recid:{a.recid} and {a.filter}", tot)
+        emit(with_via((norm(h["metadata"], a.abstract) for h in hits), f"ref of recid:{a.recid}"))
+        return
     d = inspire(f"recid:{a.recid}", "references.record,references.reference", size=1)
     if not d["hits"]["hits"]:
         sys.exit(f"recid {a.recid} not found")
@@ -276,35 +313,47 @@ def cmd_refs(a):
             ref = r.get("reference", {})
             unresolved.append({k: ref[k] for k in ("title", "arxiv_eprint", "dois", "publication_info", "misc") if k in ref})
     print(f"# {len(refs)} references: {len(recids)} resolved, {len(unresolved)} unresolved", file=sys.stderr)
-    emit(norm(m, a.abstract) for m in resolve_recids(recids, fields_for(a)))
+    emit(with_via((norm(m, a.abstract) for m in resolve_recids(recids, fields_for(a))), f"ref of recid:{a.recid}"))
     for u in unresolved[:a.show_unresolved]:
         print("# unresolved: " + json.dumps(u, ensure_ascii=False)[:300], file=sys.stderr)
     if len(unresolved) > a.show_unresolved:
         print(f"# ... {len(unresolved) - a.show_unresolved} more unresolved (raise --show-unresolved)", file=sys.stderr)
 
 
-def cmd_arxiv(a):
+def arxiv_entries(query=None, id_list=None, limit=100, sort="relevance"):
+    """Query the arXiv API; returns {arxiv_id: record-with-abstract} (insertion-ordered) and sets .total."""
     import xml.etree.ElementTree as ET
-    p = {"search_query": a.query, "start": 0, "max_results": a.limit, "sortBy": a.sort, "sortOrder": "descending"}
-    xml = http_get("https://export.arxiv.org/api/query?" + urllib.parse.urlencode(p), "arxiv")
+    p = {"start": 0, "max_results": limit if query else len(id_list), "sortBy": sort, "sortOrder": "descending"}
+    if query: p["search_query"] = query
+    if id_list: p["id_list"] = ",".join(id_list)
+    root = ET.fromstring(http_get("https://export.arxiv.org/api/query?" + urllib.parse.urlencode(p), "arxiv"))
     ns = {"a": "http://www.w3.org/2005/Atom", "arxiv": "http://arxiv.org/schemas/atom"}
-    root = ET.fromstring(xml)
-    tot = root.findtext("{http://a9.com/-/spec/opensearch/1.1/}totalResults")
-    print(f"# {tot} total", file=sys.stderr)
-    log_search("arxiv", a.query, tot)
+    out = {}
     for e in root.findall("a:entry", ns):
-        rec = {"recid": None, "texkey": None,
-               "arxiv": re.sub(r"v\d+$", "", e.findtext("a:id", "", ns).rsplit("/abs/", 1)[-1]),
-               "doi": e.findtext("arxiv:doi", None, ns),
-               "year": int(e.findtext("a:published", "0000", ns)[:4]),
-               "title": " ".join(e.findtext("a:title", "", ns).split()),
-               "authors": [n.text for n in e.findall("a:author/a:name", ns)][:5]}
-        if a.abstract:
-            rec["abstract"] = " ".join(e.findtext("a:summary", "", ns).split())
+        aid = re.sub(r"v\d+$", "", e.findtext("a:id", "", ns).rsplit("/abs/", 1)[-1])
+        out[aid] = {"recid": None, "texkey": None, "arxiv": aid,
+                    "doi": e.findtext("arxiv:doi", None, ns),
+                    "year": int(e.findtext("a:published", "0000", ns)[:4]),
+                    "title": " ".join(e.findtext("a:title", "", ns).split()),
+                    "authors": [n.text for n in e.findall("a:author/a:name", ns)][:5],
+                    "abstract": " ".join(e.findtext("a:summary", "", ns).split())}
+    arxiv_entries.total = root.findtext("{http://a9.com/-/spec/opensearch/1.1/}totalResults")
+    return out
+
+
+def cmd_arxiv(a):
+    entries = arxiv_entries(query=a.query, limit=a.limit, sort=a.sort)
+    print(f"# {arxiv_entries.total} total", file=sys.stderr)
+    log_search("arxiv", a.query, arxiv_entries.total)
+    for rec in entries.values():
+        rec["_via"] = f"arxiv: {a.query}"
+        if not a.abstract:
+            rec.pop("abstract")
         print(json.dumps(rec, ensure_ascii=False))
 
 
 def cmd_new(a):
+    """Preview only: which stdin records are not yet known. Don't put it in front of `add` (loses nvia links)."""
     seen = set().union(*(keys(r) for r in load_db())) if os.path.exists(DB) else set()
     emit(r for r in read_stdin_recs() if not (keys(r) & seen))
 
@@ -313,18 +362,21 @@ def cmd_add(a):
     recs = read_stdin_recs()
     with db_lock():
         db = load_db()
+        idx = Index(db)
         n = m = 0
         for r in recs:
             r.pop("abstract", None); r.pop("authors", None)
-            old = next((o for o in db if keys(o) & keys(r)), None)
+            via = r.pop("_via", None) or a.via  # producer label (refs/citing/search/arxiv) wins over --via
+            old = idx.get(r)
             if old:
                 merge_missing(old, r)
-                if a.via and a.via not in old.setdefault("via", []):
-                    old["via"].append(a.via); m += 1
+                idx.put(old)
+                if via and via not in old.setdefault("via", []):
+                    old["via"].append(via); m += 1
                 continue
             r.update(status=a.status, priority=a.priority, relevance=None, rqs=[], reason=a.reason or "",
-                     via=[a.via] if a.via else [], fulltext=None, summary=None)
-            db.append(r); n += 1
+                     via=[via] if via else [], fulltext=None, summary=None)
+            db.append(r); idx.put(r); n += 1
         save_db(db)
     print(f"# added {n} new; {m} existing records gained a 'via' link", file=sys.stderr)
 
@@ -390,7 +442,11 @@ def cmd_setmany(a):
         for line in sys.stdin:
             if not line.strip() or line.lstrip().startswith("#"):
                 continue
-            parts = shlex.split(line)
+            try:
+                parts = shlex.split(line)
+            except ValueError as e:  # e.g. unbalanced quote from an apostrophe: use reason="..."
+                errors.append(f"cannot parse line ({e}): {line.strip()}")
+                continue
             r = apply_set(db, parts[0], parts[1:])
             if isinstance(r, str):
                 errors.append(r)
@@ -409,10 +465,10 @@ def cmd_show(a):
 
 
 def cmd_list(a):
-    """Compact, paginated listing. Candidates are ranked by how many reviewed papers point to them (len(via))."""
+    """Compact, paginated listing, ranked by expected relevance, then nvia (distinct linking papers), then citations."""
     rs = [r for r in load_db() if (not a.status or r.get("status") == a.status)
           and (a.priority is None or r.get("priority") == a.priority)]
-    rs.sort(key=lambda r: (-len(r.get("via") or []), -(r.get("citations") or 0)))
+    rs.sort(key=lambda r: (-(r.get("expect") or 0), -nvia(r), -(r.get("citations") or 0)))
     page = rs[a.offset:a.offset + a.limit]
     print(f"# {len(rs)} matching; showing {a.offset}-{a.offset + len(page)}", file=sys.stderr)
     abstracts = {}
@@ -420,12 +476,15 @@ def cmd_list(a):
         ids = [r["recid"] for r in page if r.get("recid")]
         abstracts = {m["control_number"]: " ".join(m["abstracts"][0]["value"].split())
                      for m in resolve_recids(ids, "control_number,abstracts.value") if m.get("abstracts")}
+        arx = [r["arxiv"] for r in page if not r.get("recid") and r.get("arxiv")]
+        if arx:  # arXiv-only records (not yet in INSPIRE)
+            abstracts.update({k: v["abstract"] for k, v in arxiv_entries(id_list=arx).items()})
     for r in page:
         out = {"id": r.get("texkey") or r.get("arxiv") or r.get("doi"), "recid": r.get("recid"), "year": r.get("year"),
-               "cites": r.get("citations"), "nvia": len(r.get("via") or []), "status": r.get("status"),
+               "cites": r.get("citations"), "nvia": nvia(r), "status": r.get("status"),
                "expect": r.get("expect"), "rel": r.get("relevance"), "title": (r.get("title") or "")[:150]}
         if a.abstract:
-            out["abstract"] = abstracts.get(r.get("recid"), "")[:a.abstract_chars]
+            out["abstract"] = abstracts.get(r.get("recid") or r.get("arxiv"), "")[:a.abstract_chars]
         print(json.dumps(out, ensure_ascii=False))
 
 
@@ -459,7 +518,10 @@ def download_pdf(url, service, dest):
     try:
         data = http_get(url, service, raw=True)
     except urllib.error.HTTPError as e:
-        print(f"# download failed ({e.code}): {url}", file=sys.stderr)
+        print(f"# download failed (HTTP {e.code}): {url}", file=sys.stderr)
+        return False
+    except (urllib.error.URLError, OSError) as e:
+        print(f"# download failed ({e}): {url}", file=sys.stderr)
         return False
     if not data.startswith(b"%PDF"):
         print(f"# not a PDF ({data[:40]!r}...): {url}", file=sys.stderr)
@@ -468,6 +530,16 @@ def download_pdf(url, service, dest):
         f.write(data)
     os.replace(dest + ".tmp", dest)
     return True
+
+
+def openalex_oa(doi):
+    try:
+        d = json.loads(http_get("https://api.openalex.org/works/doi:" + urllib.parse.quote(doi)
+                                + "?select=open_access,best_oa_location", "openalex"))
+    except (urllib.error.URLError, OSError, ValueError):
+        return {}
+    return {"oa_url": (d.get("open_access") or {}).get("oa_url"),
+            "pdf_url": (d.get("best_oa_location") or {}).get("pdf_url")}
 
 
 def cmd_fetch(a):
@@ -488,13 +560,16 @@ def cmd_fetch(a):
     if a.source:
         if r.get("arxiv"):
             data = http_get(f"https://arxiv.org/e-print/{r['arxiv']}", "arxiv", raw=True)
-            os.makedirs(base, exist_ok=True)
-            try:
-                tarfile.open(fileobj=io.BytesIO(data), mode="r:gz").extractall(base, filter="data")
-            except tarfile.ReadError:
-                with open(os.path.join(base, "main.tex"), "wb") as f:
-                    f.write(gzip.decompress(data))
-            res["latex_dir"] = base
+            if not data.startswith(b"\x1f\x8b"):  # not gzip: PDF-only submission or an error page
+                print(f"# no LaTeX source available for {r['arxiv']} ({data[:20]!r})", file=sys.stderr)
+            else:
+                os.makedirs(base, exist_ok=True)
+                try:
+                    tarfile.open(fileobj=io.BytesIO(data), mode="r:gz").extractall(base, filter="data")
+                except tarfile.ReadError:  # single gzipped file
+                    with open(os.path.join(base, "main.tex"), "wb") as f:
+                        f.write(gzip.decompress(data))
+                res["latex_dir"] = base
         else:
             print("# --source ignored: no arXiv id", file=sys.stderr)
     if not res.get("source") and r.get("recid"):
@@ -506,6 +581,12 @@ def cmd_fetch(a):
                 break
         if not res.get("source"):
             res["urls"] = [u["value"] for u in m.get("urls", [])]
+    if not res.get("source") and r.get("doi"):
+        oa = openalex_oa(r["doi"])
+        if oa.get("pdf_url") and download_pdf(oa["pdf_url"], "openalex", base + ".pdf"):
+            res.update(source="openalex", pdf=base + ".pdf", text_layer=pdftotext(base + ".pdf", base + ".txt"))
+        elif oa.get("oa_url"):
+            res["oa_url"] = oa["oa_url"]  # usually a landing page: check by hand before declaring it blocked
     if res.get("source"):
         res["txt"] = base + ".txt" if os.path.exists(base + ".txt") else None
     with db_lock():  # re-load: other lr.py calls may have written while we were downloading
@@ -531,12 +612,14 @@ def parse_bib(text):
         i, depth, start = m.end(), 1, m.end()
         while depth and i < len(text):
             depth += {"{": 1, "}": -1}.get(text[i], 0); i += 1
-        body, fields = text[start:i - 1], {}
-        for fm in re.finditer(r"(\w+)\s*=\s*\{", body):
+        body, fields, pos = text[start:i - 1], {}, 0
+        field_re = re.compile(r"\s*,?\s*(\w+)\s*=\s*\{")
+        while (fm := field_re.match(body, pos)):  # field by field, skipping over each value
             j, d = fm.end(), 1
             while d and j < len(body):
                 d += {"{": 1, "}": -1}.get(body[j], 0); j += 1
             fields.setdefault(fm.group(1).lower(), body[fm.end():j - 1])
+            pos = j
         entries.append({"bibkey": m.group(2), **fields})
     return entries
 
@@ -584,22 +667,28 @@ def cmd_seed(a):
         resolved.append(r)
     with db_lock():
         db = load_db()
+        idx = Index(db)
         for r in resolved:
-            old = next((o for o in db if keys(o) & keys(r)), None)
+            old = idx.get(r)
             if old:
                 merge_missing(old, r)
                 old["bibkey"] = r["bibkey"]
+                if r.get("recid"):
+                    old.pop("unresolved", None)
+                if r.get("match"):
+                    old["match"] = r["match"]
                 if r["zotero"]:
                     old["zotero"] = r["zotero"]
                     if old.get("status") == "blocked":
                         old["status"] = "queued"
                 if tag not in old.setdefault("via", []):
                     old["via"].append(tag)
+                idx.put(old)
                 state = "updated"
             else:
                 r.update(status="queued", priority="next", relevance=None, rqs=[], reason=tag,
                          via=[tag], fulltext=None, summary=None)
-                db.append(r)
+                db.append(r); idx.put(r)
                 state = "new"
             print(json.dumps({k: r.get(k) for k in ("bibkey", "recid", "texkey", "unresolved", "match") if r.get(k) is not None}
                              | {"zotero_pdfs": len(r["zotero"]), "state": state}, ensure_ascii=False))
@@ -665,16 +754,17 @@ def main():
     S = P.add_subparsers(dest="cmd", required=True)
     def sp(name, fn, **kw):
         p = S.add_parser(name, **kw); p.set_defaults(fn=fn); return p
-    def common(p, sort="mostcited"):
+    def common(p, sort="mostcited", choices=("mostcited", "mostrecent")):
         p.add_argument("--abstract", action="store_true", help="include abstracts (verbose!)")
         p.add_argument("--limit", type=int, default=25)
-        p.add_argument("--sort", default=sort)
+        p.add_argument("--sort", default=sort, choices=choices)
     p = sp("lookup", cmd_lookup); p.add_argument("ids", nargs="+"); p.add_argument("--abstract", action="store_true")
     p = sp("search", cmd_search); p.add_argument("query"); common(p)
     p = sp("refs", cmd_refs); p.add_argument("recid", type=int); p.add_argument("--abstract", action="store_true")
     p.add_argument("--show-unresolved", type=int, default=15)
+    p.add_argument("--filter", help="only references matching an INSPIRE term, e.g. 't coherence' (no parentheses)")
     p = sp("citing", cmd_citing); p.add_argument("recid", type=int); p.add_argument("--filter"); common(p)
-    p = sp("arxiv", cmd_arxiv); p.add_argument("query"); common(p, sort="submittedDate")
+    p = sp("arxiv", cmd_arxiv); p.add_argument("query"); common(p, sort="submittedDate", choices=("submittedDate", "relevance", "lastUpdatedDate"))
     sp("new", cmd_new)
     p = sp("add", cmd_add); p.add_argument("--status", default="candidate", choices=STATUSES)
     p.add_argument("--priority", default="later", choices=["next", "later"]); p.add_argument("--via"); p.add_argument("--reason")
@@ -694,6 +784,10 @@ def main():
         a.fn(a)
     except QueryError as e:
         sys.exit(f"error: {e}")
+    except urllib.error.HTTPError as e:
+        sys.exit(f"error: HTTP {e.code} from {e.url}")
+    except (urllib.error.URLError, OSError) as e:
+        sys.exit(f"error: network/IO failure: {e}")
 
 
 if __name__ == "__main__":

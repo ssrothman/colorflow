@@ -30,7 +30,7 @@ Query syntax (SPIRES-style):
 | `t "color reconnection"`, `title coherence` | title | [v] |
 | `t coherence and t jets` | boolean `and` / `or` / `not` — no parentheses | [v] |
 | `refersto:recid:374155` | papers **citing** 374155 | [v] |
-| `citedby:recid:374155` | papers **cited by** 374155 (its resolved references) | [v] |
+| `citedby:recid:374155` | papers **cited by** 374155 (its resolved references); combinable with a filter, e.g. `citedby:recid:1218394 and t coherence` → 6 of 154 | [v] |
 | `k "color coherence"` | keyword | [v] |
 | `fulltext "drag effect"` | full-text search (arXiv-era content) | [v] |
 | `date > 2015`, `date 1990->1999` | date filter | [v] (`>`); range [u] |
@@ -38,7 +38,7 @@ Query syntax (SPIRES-style):
 | `a Sjostrand, T` / `cn CMS` | author / collaboration | [u] |
 
 Useful `fields` sets:
-- Triage: `control_number,texkeys,titles.title,abstracts.value,arxiv_eprints.value,dois.value,citation_count,publication_info.year,collaborations.value,document_type`
+- Triage: `control_number,texkeys,titles.title,abstracts.value,arxiv_eprints.value,dois.value,citation_count,publication_info.year,earliest_date,collaborations.value,document_type`
 - Full-text locating: `arxiv_eprints.value,documents.url,documents.filename,urls.value,dois.value`
 - References: `references.record,references.reference`
 
@@ -52,7 +52,7 @@ Parsing notes [v]:
 - `control_number` = recid (int). `texkeys[0]` is canonical; later entries are aliases.
 - `titles` is a list; prefer the first entry without `"source": "arXiv"` (proper LaTeX).
 - `arxiv_eprints[0].value` is a bare id (`"0709.1027"`); absent for pre-arXiv papers.
-- `publication_info` is a list (errata, proceedings) and may be absent (e.g. ATLAS PUB notes) → year `None`.
+- `publication_info` is a list (errata, proceedings); its first entry may lack `year`, and the whole field may be absent (e.g. ATLAS PUB notes). `earliest_date` (`"2014-11-02"` or `"1994-03"`) is a reliable fallback for the year. [v]
 - `abstracts` often missing for old papers.
 - `references[i] = {"record": {"$ref": ".../literature/164399"}, "reference": {...}}`; recid = last path segment. `record` is absent when INSPIRE couldn't match the reference — then only `reference.title` / `arxiv_eprint` / `publication_info` / `misc` are available (e.g. 34 refs, 33 resolved for CDF:1994zkl).
 - `documents[i] = {"url", "filename", "key"}` — often scanned preprints for pre-arXiv papers (e.g. `DESY-81-009.pdf`); these typically have **no text layer**.
@@ -71,7 +71,7 @@ GET https://export.arxiv.org/api/query?id_list=1311.5815,0709.1027
 
 Full text:
 - PDF: `https://arxiv.org/pdf/<id>`. [v]
-- LaTeX source: `https://arxiv.org/e-print/<id>` → **301 redirect** (use `curl -L`), then `application/gzip`, normally a `.tar.gz` (`arXiv-<id>v<n>.tar.gz`); occasionally a single gzipped `.tex`. [v] (tar case)
+- LaTeX source: `https://arxiv.org/e-print/<id>` → **301 redirect** (use `curl -L`), then `application/gzip`, normally a `.tar.gz` (`arXiv-<id>v<n>.tar.gz`); occasionally a single gzipped `.tex`. [v] (tar case). PDF-only submissions return a PDF instead; `lr.py` checks the gzip magic bytes and reports "no LaTeX source".
 - Old-style ids (`hep-ph/9405123`): keep the slash in URLs, `_` in filenames.
 
 ## 3. HEPData — experimental measurements
@@ -87,7 +87,7 @@ GET https://www.hepdata.net/record/ins<recid>?format=json                   [v]
 ## 4. Secondary sources (optional)
 
 Coverage of older HEP literature is much poorer than INSPIRE's (CDF:1994zkl: INSPIRE 97 citations, OpenAlex 58, Semantic Scholar 24) — use only as supplements.
-- **OpenAlex** [v]: `https://api.openalex.org/works/doi:<doi>?select=id,title,cited_by_count,open_access,referenced_works_count`. `open_access.oa_url` can locate a free full text when INSPIRE/arXiv have none. Useful for non-HEP venues (nuclear physics, EIC).
+- **OpenAlex** [v]: `https://api.openalex.org/works/doi:<doi>?select=id,title,cited_by_count,open_access,referenced_works_count`. Add `best_oa_location` to `select` for `best_oa_location.pdf_url`, a direct PDF link that is often absent. `open_access.oa_url` is usually a landing page (e.g. a DESY repository record or the publisher's DOI link), so `lr.py fetch` downloads only `pdf_url` and prints `oa_url` for a manual check. [v] Useful for non-HEP venues (nuclear physics, EIC).
 - **Semantic Scholar** [v]: `https://api.semanticscholar.org/graph/v1/paper/DOI:<doi>?fields=title,citationCount,influentialCitationCount`; `/citations?fields=title,isInfluential,contexts` gives citation contexts (often empty for old papers). Unauthenticated rate limits are tight.
 
 ## 5. Full-text access order (implemented by `lr.py fetch`)
@@ -95,7 +95,7 @@ Coverage of older HEP literature is much poorer than INSPIRE's (CDF:1994zkl: INS
 1. **Zotero** (read-only). The bib `file = {...}` field holds `;`-separated Windows paths with `\\` and `\:` escapes; map `C:\Users\simon\Zotero\storage\<KEY>\<name>.pdf` → `/mnt/c/Users/simon/Zotero/storage/<KEY>/<name>.pdf`. **Gotcha** [v]: the bib export strips `{}` from filenames, so the exact path often doesn't exist; each storage `<KEY>` dir holds one attachment, so fall back to its single PDF. Never copy or modify Zotero files.
 2. **arXiv** (from INSPIRE `arxiv_eprints`).
 3. **INSPIRE `documents[].url`** (scans; no text layer → read the PDF pages as images).
-4. **Open-access copies**: INSPIRE `urls`, OpenAlex `oa_url`, CDS (`cds.cern.ch`) for CERN preprints, SCOAP3.
-5. Otherwise mark `blocked` and include it in the end-of-iteration request to the user.
+4. **OpenAlex `best_oa_location.pdf_url`** (automatic). Otherwise `fetch` prints INSPIRE `urls` and OpenAlex `oa_url` for a manual look (CDS `cds.cern.ch` for CERN preprints, SCOAP3).
+5. Otherwise the paper is `blocked` and goes into the next check-in request to the user (see SKILL.md step 11).
 
 Reading: use the Read tool on the PDF (`pages`, ≤ 20 pages per call) so figures, tables and equations are visible; `pdftotext -layout` output (`<ID>.txt`) is for grep only.

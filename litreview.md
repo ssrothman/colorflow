@@ -50,7 +50,7 @@ Start with the human_start.bib bibliography, and loop over the following steps:
 
     c. Keyword searches on relevant paper repositories
 
-3. Repeat until it is likely that all relevant data has been analyzed. Concretely: stop expanding when two consecutive iterations yield fewer than ~10% new candidates of relevance ≥ 2, and check in with the human after roughly every 150 papers read in full (the literature-review skill defines the expansion caps).
+3. Repeat until it is likely that all relevant data has been analyzed. Concretely: stop expanding when, in two consecutive iterations, fewer than ~10% of newly triaged candidates are judged likely relevant (expected relevance ≥ 2), and check in with the human after roughly every 150 papers read in full (the literature-review skill defines the expansion caps).
 
 You must use the `literature-review` skill. Reading and analysis of many papers and topics should be fanned out to several subagents. 
 

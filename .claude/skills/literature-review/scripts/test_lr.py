@@ -116,8 +116,8 @@ class TestDB(Base):
         self.assertEqual(len(db), 3)
 
     def test_list_ranks_by_nvia(self):
-        self.add(meta(1, cites=100), meta(2, cites=1), via="a")
-        self.add(meta(2), via="b")
+        self.add(meta(1, cites=100), meta(2, cites=1), via="ref of recid:7")
+        self.add(meta(2), via="cites recid:8")
         out, _ = run(lr.cmd_list, NS(status="candidate", priority=None, limit=10, offset=0, abstract=False))
         self.assertEqual([r["recid"] for r in recs(out)], [2, 1])
 
@@ -261,6 +261,128 @@ class TestSeed(Base):
         (e,) = lr.parse_bib("@article{k1,\n  title = {A {{B}} c},\n  doi = {10.1/x}\n}\n")
         self.assertEqual((e["bibkey"], e["title"], e["doi"]), ("k1", "A {{B}} c", "10.1/x"))
 
+
+class TestPass3(Base):
+    def test_year_falls_back_to_earliest_date(self):
+        m = meta(1, pubinfo=[]); m["earliest_date"] = "2014-11-02"
+        self.assertEqual(lr.norm(m)["year"], 2014)
+
+    def test_setmany_reports_unbalanced_quotes(self):
+        self.add(meta(1, "A:2000a"))
+        with self.assertRaises(SystemExit) as cm:
+            run(lr.cmd_setmany, NS(), "A:2000a reason=Sjostrand's model\n")
+        self.assertIn("cannot parse line", str(cm.exception.code))
+        run(lr.cmd_setmany, NS(), 'A:2000a reason="Sjostrand\'s model"\n')
+        self.assertEqual(lr.load_db()[0]["reason"], "Sjostrand's model")
+
+    def test_parse_bib_ignores_assignments_inside_values(self):
+        (e,) = lr.parse_bib("@article{k,\n  abstract = {we set doi = {fake} here},\n  doi = {10.1/real}\n}\n")
+        self.assertEqual(e["doi"], "10.1/real")
+
+    def test_seed_clears_unresolved_once_resolved(self):
+        bib = os.path.join(TESTDIR, "b.bib")
+        write(bib, "@article{k,\n  title = {Some Long Title Words},\n  doi = {10.1/x}\n}\n")
+        lr.inspire = lambda *a, **k: {"hits": {"total": 0, "hits": []}}
+        run(lr.cmd_seed, NS(bib=bib))
+        self.assertTrue(lr.load_db()[0]["unresolved"])
+        lr.inspire = lambda q, *a, **k: {"hits": {"total": 1, "hits": [{"metadata": meta(9, "K:2001a", doi="10.1/x")}]}}
+        run(lr.cmd_seed, NS(bib=bib))
+        (r,) = lr.load_db()
+        self.assertEqual((r["recid"], r.get("unresolved")), (9, None))
+
+    def test_source_not_gzip_is_reported(self):
+        lr.http_get = lambda url, *a, **k: b"%PDF-1.4 only"
+        self.add(meta(3, "S:2010a", arxiv="1001.0001"), status="queued")
+        out, err = run(lr.cmd_fetch, NS(id="S:2010a", source=True))
+        self.assertIn("no LaTeX source", err)
+        self.assertNotIn("latex_dir", json.loads(out))
+
+    def test_openalex_pdf_used_when_others_fail(self):
+        def http(url, service, raw=False, **k):
+            if "openalex" in url:
+                return json.dumps({"open_access": {"oa_url": "https://land"}, "best_oa_location": {"pdf_url": "https://oa.pdf"}})
+            return b"%PDF-1.4 oa" if url == "https://oa.pdf" else b"<html>"
+        lr.http_get = http
+        lr.inspire = FakeInspire([{"control_number": 4}])
+        self.add(meta(4, "O:1985a", doi="10.1/oa"), status="queued")
+        res = json.loads(run(lr.cmd_fetch, NS(id="O:1985a", source=False))[0])
+        self.assertEqual(res["source"], "openalex")
+        self.assertEqual(lr.load_db()[0]["status"], "queued")
+
+    def test_openalex_landing_page_reported_when_blocked(self):
+        lr.http_get = lambda url, *a, **k: (json.dumps({"open_access": {"oa_url": "https://land"}, "best_oa_location": None})
+                                             if "openalex" in url else b"<html>")
+        lr.inspire = FakeInspire([{"control_number": 6}])
+        self.add(meta(6, "L:1985a", doi="10.1/land"), status="queued")
+        res = json.loads(run(lr.cmd_fetch, NS(id="L:1985a", source=False))[0])
+        self.assertEqual((res.get("blocked"), res.get("oa_url")), (True, "https://land"))
+
+    def test_list_abstracts_for_arxiv_only_records(self):
+        run(lr.cmd_add, NS(status="candidate", priority="later", via="v", reason=""),
+            json.dumps({"recid": None, "texkey": None, "arxiv": "2610.00001", "title": "t"}))
+        lr.inspire = FakeInspire([])
+        atom = ('<feed xmlns="http://www.w3.org/2005/Atom" xmlns:opensearch="http://a9.com/-/spec/opensearch/1.1/">'
+                '<opensearch:totalResults>1</opensearch:totalResults><entry><id>http://arxiv.org/abs/2610.00001v1</id>'
+                '<title>t</title><summary>An abstract.</summary><published>2026-10-01T00:00:00Z</published></entry></feed>')
+        lr.http_get = lambda *a, **k: atom
+        out, _ = run(lr.cmd_list, NS(status="candidate", priority=None, limit=5, offset=0, abstract=True, abstract_chars=50))
+        self.assertEqual(recs(out)[0]["abstract"], "An abstract.")
+
+    def test_cli_errors_are_one_line(self):
+        env = dict(os.environ, LR_DIR=TESTDIR)
+        cmd = [sys.executable, os.path.join(HERE, "lr.py")]
+        p = subprocess.run(cmd + ["search", "x", "--sort", "bogus"], env=env, capture_output=True, text=True)
+        self.assertEqual(p.returncode, 2)  # argparse rejects bad sort
+        p = subprocess.run(cmd + ["set", "Nope:1999x", "status=read"], env=env, capture_output=True, text=True)
+        self.assertNotIn("Traceback", p.stderr)
+
+    def test_add_scales(self):
+        import time as _t
+        self.add(*[meta(i) for i in range(1, 5001)])
+        t0 = _t.time()
+        self.add(*[meta(i) for i in range(4500, 5500)], via="w")
+        self.assertLess(_t.time() - t0, 5)
+        self.assertEqual(len(lr.load_db()), 5499)
+
+
+class TestVia(Base):
+    def test_citing_pulls_count_once_and_refs_add(self):
+        lr.inspire = FakeInspire([meta(1), meta(2)])
+        out1, _ = run(lr.cmd_citing, NS(recid=99, filter=None, abstract=False, limit=2, sort="mostcited"))
+        out2, _ = run(lr.cmd_citing, NS(recid=99, filter=None, abstract=False, limit=2, sort="mostrecent"))
+        for out in (out1, out2):
+            run(lr.cmd_add, NS(status="candidate", priority="later", via="ignored", reason=""), out)
+        r = lr.find(lr.load_db(), "1")
+        self.assertEqual((r["via"], lr.nvia(r)), (["cites recid:99"], 1))
+        lr.inspire = FakeInspire([{"control_number": 98, "references": [{"record": {"$ref": "x/literature/1"}}]}])
+        refs_meta = FakeInspire([meta(1)])
+        calls = iter([lr.inspire, refs_meta])
+        lr.inspire = lambda *a, **k: next(calls)(*a, **k)
+        out, _ = run(lr.cmd_refs, NS(recid=98, abstract=False, show_unresolved=0))
+        run(lr.cmd_add, NS(status="candidate", priority="later", via=None, reason=""), out)
+        r = lr.find(lr.load_db(), "1")
+        self.assertEqual(lr.nvia(r), 2)
+
+    def test_search_hits_do_not_count_toward_nvia(self):
+        lr.inspire = FakeInspire([meta(1)])
+        out, _ = run(lr.cmd_search, NS(query="t x", abstract=False, limit=1, sort="mostcited"))
+        run(lr.cmd_add, NS(status="candidate", priority="later", via=None, reason=""), out)
+        r = lr.load_db()[0]
+        self.assertEqual((r["via"], lr.nvia(r)), (["search: t x"], 0))
+
+class TestPass3b(Base):
+    def test_refs_filter_uses_citedby_and_ref_label(self):
+        fake = FakeInspire([meta(1)])
+        lr.inspire = fake
+        out, _ = run(lr.cmd_refs, NS(recid=5, abstract=False, show_unresolved=0, filter="t coherence"))
+        self.assertEqual(fake.calls[0][0], "citedby:recid:5 and t coherence")
+        self.assertEqual(recs(out)[0]["_via"], "ref of recid:5")
+
+    def test_list_ranks_expect_first(self):
+        self.add(meta(1, cites=999), meta(2, cites=1), via="ref of recid:7", status="queued")
+        db = lr.load_db(); lr.apply_set(db, "2", ["expect=3"]); lr.save_db(db)
+        out, _ = run(lr.cmd_list, NS(status="queued", priority=None, limit=10, offset=0, abstract=False))
+        self.assertEqual([r["recid"] for r in recs(out)], [2, 1])
 
 class TestRender(Base):
     def test_render_mixed_years_and_pipes(self):
