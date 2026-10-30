@@ -1,0 +1,13 @@
+  {
+    "permissions": {
+      "additionalDirectories": ["/mnt/c/Users/simon/Zotero/storage"],
+      "allow": ["Bash(python3 .claude/skills/literature-review/scripts/lr.py:*)", "Bash(pdftotext:*)"],
+      "deny": ["Edit(//mnt/c/**)", "Write(//mnt/c/**)"]
+    },
+    "hooks": {
+      "PreToolUse": [{
+        "matcher": "Read|Write|Edit|MultiEdit|NotebookEdit|Glob|Grep",
+        "hooks": [{"type": "command", "command": "python3 \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/path_guard.py"}]
+      }]
+    }
+  }

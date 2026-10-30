@@ -19,6 +19,8 @@ def inside(path, root):
 ev = json.load(sys.stdin)
 tool, inp = ev.get("tool_name", ""), ev.get("tool_input", {}) or {}
 raw = inp.get("file_path") or inp.get("notebook_path") or inp.get("path")
+if not raw and tool == "Glob" and str(inp.get("pattern", "")).startswith(("/", "~")):
+    raw = str(inp["pattern"]).split("*", 1)[0] or "/"  # absolute glob pattern: check its fixed prefix
 if not raw:
     sys.exit(0)  # Glob/Grep without path -> cwd, which is the project
 path = os.path.realpath(os.path.join(ev.get("cwd") or PROJECT, os.path.expanduser(raw)))
