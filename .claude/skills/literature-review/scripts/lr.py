@@ -8,16 +8,16 @@ so it can be piped:  lr.py citing 374155 | lr.py add
 Commands (see `lr.py <cmd> -h`):
   lookup ID...        resolve doi:/arxiv:/recid:/texkey: (or bare DOI / arXiv id / recid) to records
   search QUERY        INSPIRE search (SPIRES syntax)
-  refs RECID          references of a paper (resolved ones as records, unresolved listed on stderr)
-  citing RECID        papers citing RECID
+  refs RECID          references of a paper (unresolved ones on stderr); --filter TERM for a topical subset
+  citing RECID        papers citing RECID; --filter TERM, --sort mostcited|mostrecent
   arxiv QUERY         arXiv API search (for very recent preprints)
-  new                 filter stdin records to those NOT already in papers.jsonl
+  new                 preview: stdin records NOT already in papers.jsonl (don't put it before `add`)
   add                 add stdin records to papers.jsonl (default status=candidate)
   set ID k=v ...      update fields of a record (ID = recid, texkey, file ID, arXiv id, DOI or bibkey)
   setmany             batch `set` from stdin lines "ID k=v k=\"v w\" ..." (all-or-nothing)
   show ID...          print stored records
   list [--status S]   compact paginated listing (--limit/--offset; --abstract for triage)
-  fetch ID            obtain full text into litreview/papers/ (Zotero -> arXiv -> INSPIRE docs)
+  fetch ID            full text into litreview/papers/ (Zotero -> arXiv -> INSPIRE docs -> OpenAlex OA)
   seed [--bib F]      import a Zotero bib export (default litreview/human_start.bib)
   render              regenerate papers.md and queue.md from papers.jsonl
   bibtex              regenerate review.bib for relevance >= 2
