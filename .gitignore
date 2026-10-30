@@ -1,0 +1,6 @@
+# downloaded full texts (PDFs, extracted text, arXiv sources)
+litreview/papers/
+# lr.py rate-limit lock files
+litreview/.ratelimit/
+*.tmp
+__pycache__/
