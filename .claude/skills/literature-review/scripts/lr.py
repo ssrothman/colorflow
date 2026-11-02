@@ -33,13 +33,13 @@ Keyword searches (`search`, `arxiv`, filtered `citing`) are appended to litrevie
 import argparse, fcntl, gzip, io, json, os, re, subprocess, sys, tarfile, time
 import urllib.error, urllib.parse, urllib.request
 
-ROOT = os.path.expanduser("~/colorflow")
+ROOT = os.path.realpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), *[".."] * 4))  # project root
 LR = os.environ.get("LR_DIR", os.path.join(ROOT, "litreview"))  # LR_DIR override for testing
 DB = os.path.join(LR, "papers.jsonl")
 PAPERS = os.path.join(LR, "papers")
 BIB = os.path.join(ROOT, "litreview", "human_start.bib")
 LOCKDIR = os.path.join(LR, ".ratelimit")
-ZOTERO = "/mnt/c/Users/simon/Zotero/storage"
+ZOTERO = os.environ.get("ZOTERO_STORAGE")  # Zotero storage dir; set via env in .claude/settings.local.json
 INSPIRE = "https://inspirehep.net/api/literature"
 UA = "colorflow-litreview/1.0"
 BATCH = 40  # INSPIRE 502s on ~100 OR'ed recids; 50 tested OK
@@ -493,17 +493,23 @@ def zotero_pdfs(file_field):
     out = []
     for p in file_field.split(";"):
         p = p.replace("\\:", ":").replace("\\\\", "\\").strip()
-        if p.lower().endswith(".pdf") and p.startswith("C:\\Users\\simon\\Zotero\\storage\\"):
-            key, name = p.split("\\")[5:7]
-            path = os.path.join(ZOTERO, key, name)
-            if not os.path.exists(path):
-                # the bib export strips {} from filenames; one storage dir == one attachment, so take its pdf
-                cands = [f for f in os.listdir(os.path.join(ZOTERO, key))
-                         if f.lower().endswith(".pdf")] if os.path.isdir(os.path.join(ZOTERO, key)) else []
-                path = os.path.join(ZOTERO, key, cands[0]) if len(cands) == 1 else None
+        parts = re.split(r"[\\/]", p)  # Zotero layout: <anything>/storage/<KEY>/<file>, Windows or POSIX separators
+        if p.lower().endswith(".pdf") and len(parts) >= 3 and parts[-3] == "storage":
+            path = zotero_locate(*parts[-2:])
             if path:
                 out.append(path)
     return out
+
+
+def zotero_locate(key, name):
+    """Path of attachment <key>/<name> under ZOTERO, else the only PDF in <key>/, else None."""
+    path = os.path.join(ZOTERO, key, name)
+    if os.path.exists(path):
+        return path
+    # the bib export strips {} from filenames; one storage dir == one attachment, so take its pdf
+    d = os.path.join(ZOTERO, key)
+    cands = [f for f in os.listdir(d) if f.lower().endswith(".pdf")] if os.path.isdir(d) else []
+    return os.path.join(d, cands[0]) if len(cands) == 1 else None
 
 
 def pdftotext(pdf, txt):
@@ -550,9 +556,16 @@ def cmd_fetch(a):
     os.makedirs(PAPERS, exist_ok=True)
     base = os.path.join(PAPERS, pid(r))
     res = {"id": pid(r)}
-    zot = [p for p in r.get("zotero") or [] if os.path.exists(p)]
-    if r.get("zotero") and not zot:
-        print(f"# Zotero PDF(s) no longer exist: {r['zotero']}", file=sys.stderr)
+    stored = r.get("zotero") or []
+    zot = [p for p in stored if os.path.exists(p)]
+    relocated = None
+    if stored and not zot:  # stale paths (e.g. from another machine): look up the same <key>/<file> in ZOTERO
+        keyname = (re.split(r"[\\/]", p)[-2:] for p in stored)
+        found = (zotero_locate(*kn) for kn in keyname if len(kn) == 2 and kn[0]) if ZOTERO else ()
+        relocated = zot = [p for p in found if p]
+        print(f"# Zotero PDF(s) no longer exist: {stored}; " + (
+              f"found in ZOTERO_STORAGE: {zot}" if zot else "not in ZOTERO_STORAGE either; trying downloads"
+              if ZOTERO else "ZOTERO_STORAGE not set; trying downloads"), file=sys.stderr)
     if zot:
         res.update(source="zotero", pdf=zot[0], text_layer=pdftotext(zot[0], base + ".txt"))
     if not res.get("source") and r.get("arxiv") and download_pdf(f"https://arxiv.org/pdf/{r['arxiv']}", "arxiv", base + ".pdf"):
@@ -592,6 +605,8 @@ def cmd_fetch(a):
     with db_lock():  # re-load: other lr.py calls may have written while we were downloading
         db = load_db()
         rr = find(db, a.id)
+        if relocated:
+            rr["zotero"] = relocated
         if res.get("source"):
             rr["fulltext"] = res["source"]
             if rr.get("status") == "blocked":
@@ -645,6 +660,8 @@ def seed_resolve(e):
 def cmd_seed(a):
     """Import a Zotero biblatex export. New entries -> queued/next; existing ones gain Zotero paths
     (and blocked -> queued). Use with --bib for Zotero exports of papers the user downloaded on request."""
+    if not ZOTERO:
+        sys.exit("error: ZOTERO_STORAGE is not set (expected in the env block of .claude/settings.local.json)")
     bib = a.bib or BIB
     tag = os.path.splitext(os.path.basename(bib))[0]
     resolved = []

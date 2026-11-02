@@ -1,6 +1,6 @@
 ---
 name: literature-review
-description: Run or continue the iterative HEP literature review for this project — find papers via INSPIRE-HEP / arXiv / HEPData, obtain full text, read and summarize them, expand the queue via references, citations and keyword searches, and keep the review's state and documentation up to date. Use for any task that involves finding, reading, triaging, or summarizing physics papers.
+description: Run or continue the iterative HEP literature review — find papers via INSPIRE-HEP / arXiv / HEPData, obtain full text, read and summarize them, expand the queue via references, citations and keyword searches, and keep the review's state and documentation up to date. Use for any task that involves finding, reading, triaging, or summarizing physics papers.
 ---
 
 # Literature review
@@ -13,7 +13,7 @@ description: Run or continue the iterative HEP literature review for this projec
 
 ## Hard constraints
 
-- Read/write only inside `~/colorflow/`; Zotero PDFs (`/mnt/c/Users/simon/Zotero/storage/`) are read-only. Downloads go to `litreview/papers/` (git-ignored). Never use `/tmp` or the scratchpad.
+- Read/write only inside `~/colorflow/`; Zotero PDFs (`$ZOTERO_STORAGE`) are read-only; `/tmp` is for temporary files only. Downloads go to `litreview/papers/` (git-ignored). Bash is sandboxed and can reach only the domains in `.claude/settings.json`; other hosts only per the network rule in CLAUDE.md.
 - **Keep command output small.** Oversized outputs get persisted by the harness to `~/.claude/...`, which you may not read. Never print full INSPIRE records; avoid `--abstract` on large result sets; pipe through `head`.
 - Run every `lr.py` pipeline with `set -o pipefail` (e.g. `set -o pipefail; lr.py refs 374155 | lr.py add`). Otherwise a failed upstream command looks like "added 0".
 - Rate limits (INSPIRE 15 req/5 s, arXiv 1 req/3 s) are enforced by `lr.py` across processes. Don't bypass them with parallel raw curl.
@@ -66,7 +66,7 @@ Each iteration:
 
 1. **Load state.** `lr.py list --status queued --priority next`, `tail` of `log.md`. First run only: `lr.py seed` (resolves `human_start.bib` to INSPIRE records with Zotero PDF paths, status `queued`/`next`; entries flagged `match: title-search: verify` need a manual check), then run at least one INSPIRE search per seed topic in `litreview.md`, piped into `lr.py add`.
 2. **Pick a batch** of ~5–15 from "Next" (`list` ranks by `expect`, then `nvia`, then citations); group related papers so one reader handles a cluster. Early on, favour reviews (`tc r`) — they map the field and their reference lists are high-yield.
-3. **Get full text:** `lr.py fetch <ID>` (Zotero → arXiv PDF → INSPIRE-attached scan → OpenAlex open-access PDF; add `--source` for arXiv LaTeX on theory papers). It prints the PDF path and `text_layer`. If no source works it marks the paper `blocked` and prints any publisher `urls` and OpenAlex `oa_url` (usually a landing page). Check those by hand for a free PDF (e.g. CDS, SCOAP3); if you find one, download it to `litreview/papers/<ID>.pdf` and re-run `fetch` (an existing file there is reused). Otherwise leave the paper blocked.
+3. **Get full text:** `lr.py fetch <ID>` (Zotero → arXiv PDF → INSPIRE-attached scan → OpenAlex open-access PDF; add `--source` for arXiv LaTeX on theory papers). Stale Zotero paths (e.g. from another machine) are looked up again under `$ZOTERO_STORAGE` by attachment key and saved; if the PDF isn't there, the downloads are tried. It prints the PDF path and `text_layer`. If no source works it marks the paper `blocked` and prints any publisher `urls` and OpenAlex `oa_url` (usually a landing page). Check those by hand for a free PDF (e.g. CDS, SCOAP3); if you find one, download it to `litreview/papers/<ID>.pdf` and re-run `fetch` (an existing file there is reused). Otherwise leave the paper blocked.
 4. **Read & analyze** via subagents (see below). Readers read the **PDF itself** with the Read tool (`pages` param, ≤20 pages per call), so figures, tables and equations are visible; `<ID>.txt` is for grepping. For scans (`text_layer: false`) the PDF is the only option.
 5. **Record results** in one call: `lr.py setmany` with one line per paper, e.g. `CDF:1994zkl status=read relevance=3 rqs=1b,3 type=exp summary=summaries/CDF_1994zkl.md` (use `skimmed` / `rejected` with `reason="…"` as appropriate). It is all-or-nothing: on any error nothing is saved.
 6. **Expand the frontier**, with caps:

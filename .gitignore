@@ -6,3 +6,25 @@ litreview/.ratelimit/
 __pycache__/
 .lrtest-*/
 litreview/.triage_pending.txt
+# machine-specific Claude Code settings (Zotero path, /tmp)
+.claude/settings.local.json
+# empty placeholders the Claude Code sandbox creates over protected paths
+/.bash_profile
+/.bashrc
+/.gitconfig
+/.gitmodules
+/.idea
+/.mcp.json
+/.profile
+/.ripgreprc
+/.vscode
+/.zprofile
+/.zshrc
+/.claude/agents
+/.claude/commands
+/.claude/launch.json
+/.claude/loop.md
+/.claude/output-styles
+/.claude/routines
+/.claude/scheduled_tasks.json
+/.claude/workflows

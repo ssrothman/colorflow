@@ -4,13 +4,14 @@
     python3 .claude/skills/literature-review/scripts/test_lr.py            # offline, ~1 s
     LR_LIVE=1 python3 .claude/skills/literature-review/scripts/test_lr.py  # + live INSPIRE/arXiv
 
-State goes to a throwaway dir inside ~/colorflow (HARD RULE: no /tmp), removed afterwards.
+State goes to a throwaway, git-ignored dir in the project root, removed afterwards.
 """
 import contextlib, io, json, os, shutil, subprocess, sys, unittest
 from types import SimpleNamespace as NS
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-TESTDIR = os.path.expanduser(f"~/colorflow/.lrtest-{os.getpid()}")
+PROJECT = os.path.realpath(os.path.join(HERE, *[".."] * 4))
+TESTDIR = os.path.join(PROJECT, f".lrtest-{os.getpid()}")
 os.environ["LR_DIR"] = TESTDIR
 sys.path.insert(0, HERE)
 import lr  # noqa: E402
@@ -181,6 +182,12 @@ class TestFetch(Base):
                  r"C\:\\Users\\simon\\Zotero\\storage\\KEY2\\x.html")
         self.assertEqual(lr.zotero_pdfs(field), [os.path.join(self.zot, "KEY1", "Abe - 1994 - ensuremath{.pdf")])
 
+    def test_zotero_paths_from_any_machine(self):
+        name = "Abe - 1994 - ensuremath{.pdf"
+        for field in (rf"D\:\\Data\\Zotero\\storage\\KEY1\\{name}", f"/home/u/Zotero/storage/KEY1/{name}"):
+            self.assertEqual(lr.zotero_pdfs(field), [os.path.join(self.zot, "KEY1", name)], field)
+        self.assertEqual(lr.zotero_pdfs(f"/home/u/papers/KEY1/{name}"), [])  # not a Zotero storage path
+
     def _fetch(self, ident):
         out, err = run(lr.cmd_fetch, NS(id=ident, source=False))
         return json.loads(out), err
@@ -222,6 +229,29 @@ class TestFetch(Base):
         self.assertIn("no longer exist", err)
         self.assertTrue(res.get("blocked"))
 
+    def test_stale_zotero_path_relocated(self):
+        lr.http_get = lambda *a, **k: self.fail("must not download when Zotero has the PDF")
+        self.add(meta(9, "E:1990a"), status="queued")
+        stale = "/mnt/old/Zotero/storage/KEY1/Abe - 1994 - ensuremath .pdf"  # name differs: single-PDF fallback
+        db = lr.load_db(); db[0]["zotero"] = [stale]; lr.save_db(db)
+        res, err = self._fetch("E:1990a")
+        new = os.path.join(self.zot, "KEY1", "Abe - 1994 - ensuremath{.pdf")
+        self.assertEqual((res["source"], res["pdf"]), ("zotero", new))
+        self.assertIn("found in ZOTERO_STORAGE", err)
+        self.assertEqual(lr.load_db()[0]["zotero"], [new])  # persisted
+
+    def test_stale_zotero_path_not_found_downloads(self):
+        pdf = b"%PDF-1.4 fake"
+        lr.http_get = lambda *a, **k: pdf
+        self.add(meta(10, "F:2014a", arxiv="1311.5815"), status="queued")
+        db = lr.load_db(); db[0]["zotero"] = ["/mnt/old/Zotero/storage/NOKEY/x.pdf"]; lr.save_db(db)
+        for zot, msg in ((self.zot, "not in ZOTERO_STORAGE either"), (None, "ZOTERO_STORAGE not set")):
+            lr.ZOTERO = zot
+            res, err = self._fetch("F:2014a")
+            self.assertEqual(res["source"], "arxiv")
+            self.assertIn(msg, err)
+            self.assertEqual(lr.load_db()[0]["zotero"], ["/mnt/old/Zotero/storage/NOKEY/x.pdf"])  # unchanged
+
 
 class TestSeed(Base):
     BIB = r"""@article{good2014,
@@ -256,6 +286,19 @@ class TestSeed(Base):
         self.assertEqual(len(db["good2014"]["zotero"]), 1)
         self.assertTrue(db["orphan1980"]["unresolved"])
         self.assertEqual(db["orphan1980"]["year"], 1980)
+
+    def test_seed_requires_zotero_storage(self):
+        lr.ZOTERO = None
+        calls = []
+        lr.inspire = lambda *a, **k: calls.append(a)
+        with self.assertRaises(SystemExit) as cm:  # before reading the bib or querying INSPIRE
+            run(lr.cmd_seed, NS(bib=os.path.join(TESTDIR, "missing.bib")))
+        self.assertIn("ZOTERO_STORAGE", str(cm.exception.code))
+        self.assertEqual(calls, [])
+
+    def test_root_is_project(self):
+        self.assertEqual(lr.ROOT, PROJECT)
+        self.assertTrue(os.path.exists(os.path.join(lr.ROOT, "litreview.md")))
 
     def test_parse_bib_nested_braces(self):
         (e,) = lr.parse_bib("@article{k1,\n  title = {A {{B}} c},\n  doi = {10.1/x}\n}\n")
@@ -396,25 +439,114 @@ class TestRender(Base):
 
 
 class TestHook(unittest.TestCase):
-    HOOK = os.path.join(HERE, "..", "..", "..", "hooks", "path_guard.py")
-    P = os.path.expanduser("~/colorflow")
+    """path_guard.py against a throwaway project whose .claude/settings*.json define the allowed paths."""
+    HOOK = os.path.join(PROJECT, ".claude", "hooks", "path_guard.py")
+    SETTINGS = {"sandbox": {"filesystem": {"allowWrite": ["/tmp/lrtest-rw", "../sib"],
+                                           "allowRead": ["~/lrtest-zot", "//opt/lrtest-ro"]}}}
+    LOCAL = {"sandbox": {"filesystem": {"allowRead": ["/srv/lrtest-local"]}}}
+
+    def setUp(self):
+        self.P = os.path.join(TESTDIR, "hookproj")
+        shutil.rmtree(TESTDIR, ignore_errors=True)
+        os.makedirs(os.path.join(self.P, ".claude"))
+        self.settings(self.SETTINGS, self.LOCAL)
+
+    def tearDown(self):
+        shutil.rmtree(TESTDIR, ignore_errors=True)
+
+    def settings(self, main, local):
+        for name, cfg in (("settings.json", main), ("settings.local.json", local)):
+            f = os.path.join(self.P, ".claude", name)
+            if os.path.exists(f):
+                os.remove(f)
+            if cfg is not None:
+                write(f, cfg if isinstance(cfg, str) else json.dumps(cfg))
+
+    def run_hook(self, tool, project=True, **inp):
+        env = {k: v for k, v in os.environ.items() if k != "CLAUDE_PROJECT_DIR"}
+        if project:
+            env["CLAUDE_PROJECT_DIR"] = self.P
+        ev = json.dumps({"tool_name": tool, "tool_input": inp, "cwd": self.P if project else PROJECT})
+        return subprocess.run([sys.executable, self.HOOK], input=ev, text=True, capture_output=True, env=env)
 
     def code(self, tool, **inp):
-        ev = json.dumps({"tool_name": tool, "tool_input": inp, "cwd": self.P})
-        return subprocess.run([sys.executable, self.HOOK], input=ev, text=True, capture_output=True).returncode
+        return self.run_hook(tool, **inp).returncode
 
-    def test_cases(self):
-        z = "/mnt/c/Users/simon/Zotero/storage/X/a.pdf"
+    def test_project_and_escapes(self):
         self.assertEqual(self.code("Read", file_path=f"{self.P}/litreview.md"), 0)
-        self.assertEqual(self.code("Read", file_path="litreview.md"), 0)
-        self.assertEqual(self.code("Read", file_path=z), 0)
-        self.assertEqual(self.code("Write", file_path=z), 2)
+        self.assertEqual(self.code("Write", file_path="sub/new.md"), 0)  # relative to cwd
         self.assertEqual(self.code("Read", file_path=os.path.expanduser("~/.bashrc")), 2)
-        self.assertEqual(self.code("Edit", file_path="../colorflow2/x"), 2)
-        self.assertEqual(self.code("Read", file_path=f"{self.P}/../.ssh/id"), 2)
+        self.assertEqual(self.code("Edit", file_path="../hookproj2/x"), 2)  # sibling with a common prefix
+        self.assertEqual(self.code("Read", file_path=f"{self.P}/../../.ssh/id"), 2)
         self.assertEqual(self.code("Glob", pattern="/etc/**"), 2)
         self.assertEqual(self.code("Glob", pattern="**/*.md"), 0)
         self.assertEqual(self.code("Grep", pattern="x", path="/etc"), 2)
+
+    def test_allow_write_is_read_write(self):
+        for tool in ("Read", "Write", "Edit"):
+            self.assertEqual(self.code(tool, file_path="/tmp/lrtest-rw/a/b.txt"), 0)
+        self.assertEqual(self.code("Write", file_path="/tmp/lrtest-rwx/b.txt"), 2)  # prefix, not a subdir
+        self.assertEqual(self.code("Write", file_path="/tmp/other.txt"), 2)
+        self.assertEqual(self.code("Write", file_path=os.path.join(TESTDIR, "sib", "x")), 0)  # "../sib" vs project
+
+    def test_allow_read_is_read_only(self):
+        home_zot = os.path.expanduser("~/lrtest-zot/K/a.pdf")
+        for path in (home_zot, "/opt/lrtest-ro/a.pdf", "/srv/lrtest-local/a.pdf"):  # ~/, //, local file
+            self.assertEqual(self.code("Read", file_path=path), 0, path)
+            self.assertEqual(self.code("Grep", pattern="x", path=os.path.dirname(path)), 0, path)
+            self.assertEqual(self.code("Write", file_path=path), 2, path)
+            self.assertEqual(self.code("Edit", file_path=path), 2, path)
+        self.assertEqual(self.code("Glob", pattern="/opt/lrtest-ro/**/*.pdf"), 0)
+
+    def test_missing_settings_allow_only_project(self):
+        self.settings(None, None)
+        self.assertEqual(self.code("Read", file_path="/srv/lrtest-local/a.pdf"), 2)
+        self.assertEqual(self.code("Write", file_path="/tmp/lrtest-rw/a"), 2)
+        self.assertEqual(self.code("Read", file_path="litreview.md"), 0)
+
+    def test_bad_settings_fail_closed(self):
+        bad = ["{not json", "[1, 2]", {"sandbox": []}, {"sandbox": {"filesystem": {"allowWrite": "/tmp/lrtest-rw"}}},
+               {"sandbox": {"filesystem": {"allowRead": [""]}}}]
+        for cfg in bad:
+            self.settings(self.SETTINGS, cfg)  # main file fine, local file broken -> nothing extra allowed
+            r = self.run_hook("Write", file_path="/tmp/lrtest-rw/a")
+            self.assertEqual(r.returncode, 2, cfg)
+            self.assertIn("settings error", r.stderr)
+            self.assertEqual(self.code("Read", file_path="/opt/lrtest-ro/a.pdf"), 2, cfg)
+            self.assertEqual(self.code("Read", file_path="litreview.md"), 0, cfg)
+
+    def test_glob_patterns(self):
+        self.assertEqual(self.code("Glob", pattern="litreview/**/*.md"), 0)
+        self.assertEqual(self.code("Glob", pattern="*.md", path="sub"), 0)
+        for pat in ("../../**", "sub/../../x/*", "{../..,x}/*", "~/*", "/etc/*.conf"):
+            self.assertEqual(self.code("Glob", pattern=pat), 2, pat)
+        self.assertEqual(self.code("Glob", pattern="*.md", path="/etc"), 2)
+        self.assertEqual(self.code("Glob", pattern="/etc/*", path=self.P), 2)  # absolute pattern beats path
+
+    def test_settings_and_hooks_are_user_only(self):
+        for rel in (".claude/settings.json", ".claude/settings.local.json", ".claude/hooks/path_guard.py",
+                    ".claude/hooks/new.py"):
+            for tool in ("Write", "Edit", "MultiEdit"):
+                self.assertEqual(self.code(tool, file_path=os.path.join(self.P, rel)), 2, (tool, rel))
+            self.assertEqual(self.code("Read", file_path=os.path.join(self.P, rel)), 0, rel)
+        self.assertEqual(self.code("Edit", file_path=".claude/settings.local.example.json"), 0)
+        self.assertEqual(self.code("Write", file_path=".claude/hooksx/a"), 0)
+        r = self.run_hook("Write", file_path="sub/../.claude/settings.json")
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("changed by the user only", r.stderr)
+
+    def test_crash_blocks(self):
+        env = dict(os.environ, CLAUDE_PROJECT_DIR=self.P)
+        for stdin in ("not json", "[]", json.dumps({"tool_name": "Read", "tool_input": "x"}),
+                      json.dumps({"tool_name": "Read", "tool_input": {"file_path": 5}})):
+            r = subprocess.run([sys.executable, self.HOOK], input=stdin, text=True, capture_output=True, env=env)
+            self.assertEqual(r.returncode, 2, stdin)
+            self.assertIn("hook error", r.stderr)
+
+    def test_project_dir_defaults_to_hook_location(self):
+        r = self.run_hook("Read", project=False, file_path=os.path.join(PROJECT, "litreview.md"))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.run_hook("Read", project=False, file_path="/srv/lrtest-local/a.pdf").returncode, 2)
 
 
 @unittest.skipUnless(LIVE, "set LR_LIVE=1 for live API tests")

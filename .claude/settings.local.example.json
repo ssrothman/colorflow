@@ -1,0 +1,11 @@
+{
+  "env": { "ZOTERO_STORAGE": "/path/to/Zotero/storage" },
+  "permissions": { "additionalDirectories": ["/path/to/Zotero/storage"] },
+  "sandbox": {
+    "filesystem": {
+      "allowRead": ["/path/to/Zotero/storage"],
+      "denyWrite": ["/path/to/Zotero/storage"],
+      "allowWrite": ["/tmp"]
+    }
+  }
+}
