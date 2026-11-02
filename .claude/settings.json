@@ -1,5 +1,16 @@
 {
-  "permissions": { "blockReadsOutsideWorkingDirectories": true },
+  "permissions": {
+    "blockReadsOutsideWorkingDirectories": true,
+    "allow": [
+        "Bash(ls:*)", "Bash(cat:*)", "Bash(head:*)", "Bash(tail:*)", "Bash(wc:*)",
+        "Bash(grep:*)", "Bash(awk:*)", "Bash(sed:*)", "Bash(cut:*)", "Bash(sort:*)",
+        "Bash(find:*)", "Bash(stat:*)", "Bash(cmp:*)", "Bash(diff:*)",
+        "Bash(pdftotext:*)", "Bash(pdfinfo:*)",
+        "Bash(python3 .claude/skills/literature-review/scripts/lr.py:*)",
+        "Bash(python3 .claude/skills/literature-review/scripts/test_lr.py:*)",
+        "Bash(git status:*)", "Bash(git diff:*)", "Bash(git log:*)"
+    ]  
+  },
   "sandbox": {
     "enabled": true,
     "failIfUnavailable": true,

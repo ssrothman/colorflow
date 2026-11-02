@@ -30,3 +30,15 @@
 - Azimov:1986rv: no PDF obtainable (user) → stays `blocked`, marked inaccessible in `notes`.
 - Ermolaev:1981cm: the first Zotero attachment (CZKED47X) was the Sjostrand:1993hi PDF; user attached the correct scan (E2ELN4KD, 4 pp., no text layer; checked page 1) → `queued`/`next`.
 - SKILL.md: check-in trigger no longer counts blocked papers marked `notes="inaccessible: …"`; these are listed in `open_questions.md`.
+
+## Iteration 3 — 2026-11-02
+
+- **Batch:** the 15 papers unblocked at the check-in (all Zotero PDFs; Ermolaev:1981cm is a scan read from page images). 8 readers.
+- **Read** 15 papers, all relevance 3: Andersson:1983ia, Bassetto:1983mvz (reviews); Ermolaev:1981cm, Azimov:1985zta, Sjostrand:1993hi (theory); Andersson:1980vk, Khoze:1989km, Lonnblad:1995yk (MC); Boudinov:1993mc, Gustafson:1988fs, Gustafson:1994cd (pheno); JADE:1985mmd, L3:1995ahv, OPAL:1990vmr, OPAL:1992lzb (exp).
+- **Key new results:** angular ordering arises only after summing diagrams (Ermolaev–Fadin, BCM); string kink and perturbative antenna give the same q–q̄ depletion at leading N_c, and PETRA data (r = 1.39 ± 0.04) are fitted by Lund and by the angular-ordered Webber shower alike, only incoherent/independent models fail; ξ-peak slope is weak coherence evidence (Boudinov critique), azimuthal/PPCA correlations stronger; early CR theory: perturbative CR negligible (≲ 5 MeV), SK-I/II non-perturbative ~40 MeV, SK-II shift negative while SK-I of uncertain sign; Gustafson–Häkkinen zero-central-particle WW test never measured at LEP2 (as far as known).
+- **Expansion:** references of all 15 (reviews in full: 96 and 89 resolved refs); citing papers (top-30 + 15 most recent) for 10; topical filtered citing for the 5 with > 300 citations; 12 journal-reference lookups of reader leads (11 already known). Reconnection-filtered citing lists added ~0 new (saturated, as in iteration 2).
+- **Triage:** 346 candidates (9 subagents) → 18 next, 59 later, 269 rejected; expect ≥ 2 fraction ≈ 22 % (iter. 2 ≈ 26 %, iter. 1 ≈ 46 %) — not converged. Override: Mukhi:1982bk rejected → later (flagged by Bassetto reader). Raised to next: Fadin:1983aw, Mueller:1981ex, OPAL:1992cqm.
+- **Verification:** all 15 summaries checked (6 verifiers, ~900 claims); ~55 corrections, mostly figure read-offs (L3 Fig. 3b, Khoze Fig. 2, Gustafson figures), plus anchors, two misattributions, two σ recalculations (JADE ≈ 10σ; Boudinov 2.7σ/1.3σ) and the SK-I/SK-II m_W sign statement.
+- **Docs:** synthesis.md (RQ1–4 rewritten/restructured; new string-effect and CR-model-chronology sections) and open_questions.md (18 items; 7 new) revised by a subagent; review.bib 42 entries.
+- **Process note:** triage workers collided on shared temp file names in $TMPDIR; two re-ran into unique files. Use unique temp names in future triage prompts.
+- **DB:** 1791 records: 42 read, 174 queued next, 414 queued later, 1160 rejected, 1 blocked (Azimov:1986rv, inaccessible).
