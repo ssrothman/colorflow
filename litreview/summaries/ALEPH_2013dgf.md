@@ -41,7 +41,7 @@ Read for this summary: Ch. 4 (Final-State Interconnection: CR §4.1, BEC §4.2, 
 | ALEPH | 0.34 (+1.86 −0.34) incl. +11 % BEC syst. (Eq. D.5); 0.33 (+1.82 −0.33) without (Eq. D.4) | Eq. D.4 "agrees well" with Ref. 111 (value not quoted) |
 | DELPHI | 2.12 (+2.61 −1.33) (Eq. D.9, ρ = 0.5 between inputs) | 2.2 (+2.5 −1.3), Ref. 128 (Eq. D.6) |
 | L3 | 0.76 (+1.89 −1.22) (Eq. D.10) | 0.08 (+1.02 −0.08), Ref. 129 |
-| OPAL | 1.24 (+1.13 −0.77) (Eq. D.11) | p_reco = 0.43 (+0.15 −0.20), i.e. k_I ≈ 1.3 (+1.1 −0.8); k_I < 2.3 at 68 % CL |
+| OPAL | 1.24 (+1.13 −0.77) (Eq. D.11) | p_reco = 0.43 (+0.15 −0.20), i.e. k_I ≈ 1.3 (+1.1 −0.8); k_I < 2.3 at 68 % CL — from Ref. [114], OPAL EPJC 45 (2006) 307 (m_W paper, particle flow + ΔM_W combined), p. 188; the particle-flow-only paper OPAL:2005cdr quotes 37 % (10–56 % at 68 % CL) |
 
   - The L3 difference is attributed to L3 using its own tuned no-CR reference MC instead of the common sample. It is called compatible within the hadronisation systematic (p. 188).
   - In Fig. 4.3 (curves start at k_I ≈ 0.1) no single-experiment curve exceeds Δχ² ≈ 4 at low k_I, so none alone excludes no-CR at 2σ. From the quoted errors, the Δχ² at k_I = 0 is roughly 0 for ALEPH, ~0.4 for L3, and ~2.5 for both DELPHI and OPAL (our parabolic estimate, not stated in the paper).
