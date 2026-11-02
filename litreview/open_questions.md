@@ -24,3 +24,7 @@ _Status: after iteration 2 (2026-10-30). Each item cites the summaries that rais
 
 10. Most classic coherence measurements are detector-level, shape-only, statistics-limited ([CDF_1994zkl](summaries/CDF_1994zkl.md), [D0_1997tye](summaries/D0_1997tye.md), [OPAL_1991xwi](summaries/OPAL_1991xwi.md), [JADE_1981ofk](summaries/JADE_1981ofk.md)); CMS provides unfolded data ([CMS_2013cvx](summaries/CMS_2013cvx.md)). Which coherence/CR measurements are in HEPData/Rivet for generator tests?
 11. The D0 W+jet evidence rests on 390 events ([D0_1999lfo](summaries/D0_1999lfo.md)); CMS Z+2j does not test coherence on/off ([CMS_2021hnp](summaries/CMS_2021hnp.md)). A high-statistics LHC jet–boson coherence measurement seems to be missing.
+
+## Literature gaps (full text unobtainable)
+
+- Azimov:1986rv — Azimov, Dokshitzer, Troyan, Khoze, "Chromodynamical wave nature of hadron fluxes and the string effect", Sov. J. Nucl. Phys. 43 (1986) 95 (expected relevance 3; same authors as Azimov:1985zta, "The string effect and QCD coherence", which is available). No PDF found (user, 2026-11-02).

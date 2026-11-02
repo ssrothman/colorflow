@@ -23,3 +23,10 @@
 - **Verification:** all 9 relevance-3 summaries checked; 4–13 corrections each (e.g. Christiansen: local not global λ minimum; ALEPH: no single experiment > 2σ; CMS: excess at β≈0 only; Khoze: R_γ comparison is for a restricted interval).
 - **DB:** 1445 records: 27 read, 153 queued next, 359 queued later, 890 rejected, 16 blocked.
 - **CHECK-IN: 2026-10-30, 27 papers read so far.** Triggered by 16 blocked papers, all with expect = 3.
+
+## Check-in resolution — 2026-11-02
+
+- User imported `blocked_2026-10-30.bib` into Zotero. 14 PDFs linked (each checked against the paper's first page) → `queued`/`next`. JADE:1985mmd and Andersson:1983ia were already in Zotero (RWSDB93D, 7JD44EC5). OPAL:1990vmr has two near-identical Zotero copies (4T84ZBNQ linked, AHSGJWSI unused).
+- Azimov:1986rv: no PDF obtainable (user) → stays `blocked`, marked inaccessible in `notes`.
+- Ermolaev:1981cm: the first Zotero attachment (CZKED47X) was the Sjostrand:1993hi PDF; user attached the correct scan (E2ELN4KD, 4 pp., no text layer; checked page 1) → `queued`/`next`.
+- SKILL.md: check-in trigger no longer counts blocked papers marked `notes="inaccessible: …"`; these are listed in `open_questions.md`.
